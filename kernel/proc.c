@@ -509,6 +509,77 @@ yield(void)
   release(&p->lock);
 }
 
+// Cooperative yield: deliver `value` to process `target_pid` and block
+// until `target_pid` yields back to us. Uses chan == &myproc() as the
+// rendezvous token: a process sleeping with chan == &X is "waiting for
+// X to yield to me". The delivered value is passed via the target's
+// trapframe->a0 (the RISC-V return-value register), which syscall()
+// forwards to user space.
+// Returns -1 if the pid is invalid, self, non-existent, or killed.
+int
+kco_yield(int target_pid, int value)
+{
+  struct proc *p = myproc();
+  struct proc *target = 0;
+
+  if(target_pid <= 0 || target_pid == p->pid)
+    return -1;
+
+  // Acquire my own lock first. push_off() keeps interrupts disabled
+  // across the entire critical section, preventing a lost wakeup where
+  // a timer interrupt would yield us out between delivering to the
+  // target and marking ourselves SLEEPING.
+  acquire(&p->lock);
+
+  // Scan for target. Skip self to avoid re-acquiring p->lock.
+  for(struct proc *q = proc; q < &proc[NPROC]; q++){
+    if(q == p) continue;
+    acquire(&q->lock);
+    if(q->pid == target_pid){
+      if(q->state == UNUSED || q->state == ZOMBIE || q->killed){
+        release(&q->lock);
+        release(&p->lock);
+        return -1;
+      }
+      target = q;
+      break; // keep q's lock
+    }
+    release(&q->lock);
+  }
+
+  if(target == 0){
+    release(&p->lock);
+    return -1;
+  }
+
+  // Both p->lock and target->lock held.
+  // If target is already sleeping waiting for me, deliver value and
+  // wake it. Otherwise, target will find us sleeping when it eventually
+  // calls co_yield(us, ...).
+  if(target->state == SLEEPING && target->chan == (void*)p){
+    target->trapframe->a0 = value;
+    target->chan = 0;
+    target->state = RUNNABLE;
+  }
+  release(&target->lock);
+
+  // Sleep waiting for peer to yield back.
+  p->chan = (void*)target;
+  p->state = SLEEPING;
+  sched();
+
+  // Woken: either peer delivered (wrote trapframe->a0 and set us
+  // RUNNABLE) or kkill woke us with no handoff.
+  p->chan = 0;
+  int was_killed = p->killed;
+  int result = p->trapframe->a0;
+  release(&p->lock);
+
+  if(was_killed)
+    return -1;
+  return result;
+}
+
 // A fork child's very first scheduling by scheduler()
 // will swtch to forkret.
 void
