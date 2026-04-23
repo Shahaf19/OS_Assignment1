@@ -553,23 +553,39 @@ kco_yield(int target_pid, int value)
   }
 
   // Both p->lock and target->lock held.
-  // If target is already sleeping waiting for me, deliver value and
-  // wake it. Otherwise, target will find us sleeping when it eventually
-  // calls co_yield(us, ...).
   if(target->state == SLEEPING && target->chan == (void*)p){
+    // Target is parked waiting for us: direct handoff. Skip RUNNABLE
+    // and swtch straight into target's kernel context, bypassing the
+    // scheduler entirely.
     target->trapframe->a0 = value;
     target->chan = 0;
-    target->state = RUNNABLE;
-  }
-  release(&target->lock);
+    target->state = RUNNING;
+    mycpu()->proc = target;
 
-  // Sleep waiting for peer to yield back.
-  p->chan = (void*)target;
-  p->state = SLEEPING;
-  sched();
+    p->chan = (void*)target;
+    p->state = SLEEPING;
+
+    // Release our own lock before swtch: p is already SLEEPING, and
+    // target->lock is still held (so interrupts stay off on CPUS=1).
+    // Target will release its own lock after resuming.
+    release(&p->lock);
+
+    int intena = mycpu()->intena;
+    swtch(&p->context, &target->context);
+    mycpu()->intena = intena;
+
+    // Resumed: whoever swtched into us acquired p->lock during their
+    // scan, so we hold it now.
+  } else {
+    // Target not ready: fall back to sleeping via the scheduler.
+    release(&target->lock);
+    p->chan = (void*)target;
+    p->state = SLEEPING;
+    sched();
+  }
 
   // Woken: either peer delivered (wrote trapframe->a0 and set us
-  // RUNNABLE) or kkill woke us with no handoff.
+  // RUNNING/RUNNABLE) or kkill woke us with no handoff.
   p->chan = 0;
   int was_killed = p->killed;
   int result = p->trapframe->a0;
@@ -579,7 +595,6 @@ kco_yield(int target_pid, int value)
     return -1;
   return result;
 }
-
 // A fork child's very first scheduling by scheduler()
 // will swtch to forkret.
 void

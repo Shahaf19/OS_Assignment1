@@ -36,5 +36,5 @@ entry("getpid");
 entry("sbrk");
 entry("sleep");
 entry("uptime");
-entry("memsize")
-entry("co_yield")
+entry("memsize");
+entry("co_yield");
