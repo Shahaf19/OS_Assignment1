@@ -453,7 +453,11 @@ scheduler(void)
     intr_on();
 
     for(p = proc; p < &proc[NPROC]; p++) {
-      acquire(&p->lock);
+      // direct swtch can leave us either already holding p's
+      // lock (yield()'d through swtch) or with it released by a direct
+      // co_yield. Guard both ends.
+      if(!holding(&p->lock))
+        acquire(&p->lock);
       if(p->state == RUNNABLE) {
         // Switch to chosen process.  It is the process's job
         // to release its lock and then reacquire it
