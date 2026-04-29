@@ -581,11 +581,13 @@ kco_yield(int target_pid, int value)
     // Resumed: whoever swtched into us acquired p->lock during their
     // scan, so we hold it now.
   } else {
-    // Target not ready: fall back to sleeping via the scheduler.
+    // Target not ready: fall back to sleeping.
+    release(&p->lock);
+    sleep((void*)target, &target->lock);
+    // sleep() returns with target->lock held and p->lock released.
+    // Restore the locking state expected by the shared post-resume code.
     release(&target->lock);
-    p->chan = (void*)target;
-    p->state = SLEEPING;
-    sched();
+    acquire(&p->lock);
   }
 
   // Woken: either peer delivered (wrote trapframe->a0 and set us
